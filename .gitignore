@@ -1,0 +1,7 @@
+.venv/
+__pycache__/
+*.pyc
+*.tmp
+config.json
+ui/node_modules/
+server/static/
