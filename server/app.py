@@ -8,7 +8,7 @@ import time
 import uuid
 from contextlib import asynccontextmanager
 from pathlib import Path
-from typing import Any, Dict, List, Optional, Tuple
+from typing import Any, Dict, List, Optional, Tuple, Union
 
 from fastapi import FastAPI, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
@@ -17,6 +17,7 @@ from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel
 
 from server.config import ProxyConfig, load_config, update_config
+from server.embeddings import DEFAULT_EMBED_MODEL, compute_embeddings
 from server.harnesses import (
     HarnessError,
     HarnessInfo,
@@ -161,17 +162,45 @@ async def list_models():
     return {"object": "list", "data": data}
 
 
+class EmbeddingRequest(BaseModel):
+    input: Union[str, List[Any]]
+    model: str = DEFAULT_EMBED_MODEL
+    dimensions: Optional[int] = None
+    encoding_format: Optional[str] = "float"
+
+
 @app.post("/v1/embeddings")
-async def embeddings_not_supported():
-    return JSONResponse(
-        status_code=501,
-        content={
-            "error": {
-                "message": "Agent CLI harnesses do not provide vector embeddings.",
-                "type": "not_implemented",
-            }
-        },
+async def create_embeddings(body: EmbeddingRequest):
+    inputs = [body.input] if isinstance(body.input, str) else body.input
+    if not inputs:
+        raise HTTPException(status_code=400, detail="input must not be empty")
+
+    preview = f"embed({len(inputs)} items)"
+    rec = runtime.monitor.start_request(
+        harness="fastembed",
+        model=DEFAULT_EMBED_MODEL,
+        requested_model=body.model or DEFAULT_EMBED_MODEL,
+        stream=False,
+        prompt=preview,
     )
+    try:
+        vectors = await compute_embeddings(inputs, dimensions=body.dimensions)
+        runtime.monitor.finish_request(rec, output=f"{len(vectors)}x{len(vectors[0])}d")
+        return {
+            "object": "list",
+            "data": [
+                {"object": "embedding", "index": i, "embedding": vec}
+                for i, vec in enumerate(vectors)
+            ],
+            "model": DEFAULT_EMBED_MODEL,
+            "usage": {"prompt_tokens": 0, "total_tokens": 0},
+        }
+    except Exception as exc:
+        runtime.monitor.finish_request(rec, error=str(exc))
+        return JSONResponse(
+            status_code=500,
+            content={"error": {"message": str(exc), "type": "embedding_error"}},
+        )
 
 
 class ChatCompletionRequest(BaseModel):
