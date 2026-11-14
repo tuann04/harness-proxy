@@ -339,11 +339,17 @@ async def stream_agy(
     prompt: str,
     timeout: float,
 ) -> AsyncIterator[StreamChunk]:
-    with request_workdir() as workdir:
+    # Route all agy requests into one dedicated empty project directory so
+    # Antigravity does not accumulate a new project entry on every request.
+    agy_dir = ensure_sandbox_dir() / "agy-shared"
+    agy_dir.mkdir(parents=True, exist_ok=True)
+    temp_file: Optional[Path] = None
+
+    try:
         prompt_arg = prompt
         # Keep well below Linux MAX_ARG_STRLEN (128 KiB) for a single argv element.
         if len(prompt.encode("utf-8")) > 110_000:
-            fd, tmp_name = tempfile.mkstemp(prefix="prompt_", suffix=".txt", dir=str(workdir))
+            fd, tmp_name = tempfile.mkstemp(prefix="prompt_", suffix=".txt", dir=str(agy_dir))
             os.close(fd)
             temp_file = Path(tmp_name)
             temp_file.write_text(prompt, encoding="utf-8")
@@ -353,7 +359,8 @@ async def stream_agy(
 
         cmd = [
             binary,
-            "--new-project",
+            "--project",
+            "harness-proxy-sandbox",
             "--output-format",
             "stream-json",
             "--disable-slash-commands",
@@ -367,7 +374,7 @@ async def stream_agy(
             stdin=asyncio.subprocess.DEVNULL,
             stdout=asyncio.subprocess.PIPE,
             stderr=asyncio.subprocess.PIPE,
-            cwd=str(workdir),
+            cwd=str(agy_dir),
             limit=SUBPROCESS_LIMIT,
         )
         streamed_any = False
@@ -407,6 +414,9 @@ async def stream_agy(
                 yield StreamChunk(usage=usage)
         finally:
             await _kill_proc(proc)
+    finally:
+        if temp_file is not None:
+            temp_file.unlink(missing_ok=True)
 
 
 async def stream_claude(
